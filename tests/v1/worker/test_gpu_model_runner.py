@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -861,6 +862,56 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 def test_reload_weights_before_load_model(model_runner):
     with pytest.raises(ValueError):
         model_runner.reload_weights()
+
+
+def _make_draft_copy_runner(draft_token_ids: torch.Tensor) -> GPUModelRunner:
+    runner = object.__new__(GPUModelRunner)
+    runner._draft_token_ids = draft_token_ids
+    runner._draft_token_req_ids = None
+    runner.prev_num_spec_tokens = 2
+    runner.use_async_scheduling = False
+    runner.input_batch = SimpleNamespace(req_ids=["req_a", "req_b"])
+    runner.draft_token_ids_event = Mock()
+    runner.draft_token_ids_copy_stream = Mock()
+    runner.draft_token_ids_cpu = torch.full((2, 2), -1, dtype=torch.int64)
+    return runner
+
+
+def test_empty_draft_tokens_skip_cpu_copy_event(monkeypatch):
+    default_stream = Mock()
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: default_stream)
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+    runner = _make_draft_copy_runner(torch.empty((2, 0), dtype=torch.int64))
+    scheduler_output = SimpleNamespace(has_structured_output_requests=False)
+
+    runner._copy_draft_token_ids_to_cpu(scheduler_output)
+    draft_token_ids, req_ids = runner._get_draft_token_ids_cpu()
+
+    assert runner.prev_num_spec_tokens == 0
+    assert req_ids == ["req_a", "req_b"]
+    assert draft_token_ids == [[], []]
+    runner.draft_token_ids_copy_stream.wait_stream.assert_not_called()
+    runner.draft_token_ids_event.record.assert_not_called()
+    runner.draft_token_ids_event.synchronize.assert_not_called()
+
+
+def test_nonempty_draft_tokens_keep_cpu_copy_event(monkeypatch):
+    default_stream = Mock()
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: default_stream)
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+    runner = _make_draft_copy_runner(torch.tensor([[1, 2], [3, 4]], dtype=torch.int64))
+    scheduler_output = SimpleNamespace(has_structured_output_requests=False)
+
+    runner._copy_draft_token_ids_to_cpu(scheduler_output)
+    draft_token_ids, req_ids = runner._get_draft_token_ids_cpu()
+
+    assert req_ids == ["req_a", "req_b"]
+    assert draft_token_ids == [[1, 2], [3, 4]]
+    runner.draft_token_ids_copy_stream.wait_stream.assert_called_once_with(
+        default_stream
+    )
+    runner.draft_token_ids_event.record.assert_called_once()
+    runner.draft_token_ids_event.synchronize.assert_called_once()
 
 
 def test_sample_passes_reordered_draft_probs_to_rejection_sampler():

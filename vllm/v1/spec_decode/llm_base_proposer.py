@@ -597,6 +597,15 @@ class SpecDecodeBaseProposer:
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
 
+        # Keep the drafter KV cache in sync even when Dynamic SD chooses K=0.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(
+                batch_size,
+                0,
+                device=last_hidden_states.device,
+                dtype=torch.int64,
+            )
+
         # After step 0: switch to reuse mode so steps 1+ skip the indexer
         # and read the indices that step 0 just wrote into the shared buffer.
         if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
@@ -606,17 +615,6 @@ class SpecDecodeBaseProposer:
             self.model.model.compact_topk_indices(token_indices_to_sample)
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
-
-        # No draft tokens requested (e.g. Dynamic SD decided K=0).
-        # The prefill forward pass above already ran to keep the drafter
-        # KV cache in sync, so just return an empty tensor.
-        if self.num_speculative_tokens == 0:
-            return torch.empty(
-                batch_size,
-                0,
-                device=sample_hidden_states.device,
-                dtype=torch.int64,
-            )
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:

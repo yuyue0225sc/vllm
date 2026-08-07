@@ -4900,6 +4900,8 @@ class GPUModelRunner(
         draft_token_ids: torch.Tensor = self._draft_token_ids
         if not torch.is_tensor(draft_token_ids):
             return
+        if draft_token_ids.shape[1] == 0:
+            return
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_copy_stream is not None
         assert self.draft_token_ids_cpu is not None
@@ -4924,11 +4926,13 @@ class GPUModelRunner(
         req_ids = self._draft_token_req_ids
         if req_ids is None:
             return [], []
+        assert isinstance(self._draft_token_ids, torch.Tensor)
+        num_spec_tokens = self._draft_token_ids.shape[1]
+        if num_spec_tokens == 0:
+            return [[] for _ in req_ids], req_ids
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_cpu is not None
         self.draft_token_ids_event.synchronize()
-        assert isinstance(self._draft_token_ids, torch.Tensor)
-        num_spec_tokens = self._draft_token_ids.shape[1]
         return self.draft_token_ids_cpu[
             : len(req_ids), :num_spec_tokens
         ].tolist(), req_ids

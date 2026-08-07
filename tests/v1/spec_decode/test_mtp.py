@@ -115,35 +115,24 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
 
 
-@pytest.mark.parametrize("num_speculative_tokens", [1])
-def test_mtp_propose(num_speculative_tokens, monkeypatch):
-    """Test that MTP's forward method returns hidden states directly"""
-
+@pytest.mark.parametrize("runtime_num_speculative_tokens", [0, 1])
+def test_mtp_propose_honors_runtime_num_speculative_tokens(
+    runtime_num_speculative_tokens, monkeypatch
+):
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
     total_tokens = sum(seq_lens)
     vocab_size = 100
 
-    proposer = _create_mtp_proposer(num_speculative_tokens)
+    proposer = _create_mtp_proposer(num_speculative_tokens=1)
     hidden_size = proposer.hidden_size
 
     # Mock the MTP model to verify it returns hidden states directly
     model_mock = mock.MagicMock()
 
-    # MTP returns hidden states directly
-    if num_speculative_tokens == 1:
-        model_mock.return_value = torch.zeros(total_tokens, hidden_size, device=device)
-    else:
-        # Multiple forward passes for multi-token speculation
-        forward_returns = []
-        for i in range(num_speculative_tokens):
-            if i == 0:
-                h_states = torch.zeros(total_tokens, hidden_size, device=device)
-            else:
-                h_states = torch.zeros(batch_size, hidden_size, device=device)
-            forward_returns.append(h_states)
-        model_mock.side_effect = forward_returns
+    # MTP returns hidden states directly.
+    model_mock.return_value = torch.zeros(total_tokens, hidden_size, device=device)
 
     # Mock compute_logits
     def create_deterministic_logits(batch_size, vocab_size, token_offset):
@@ -151,16 +140,9 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
         logits[:, token_offset] = 100.0
         return logits
 
-    if num_speculative_tokens == 1:
-        model_mock.compute_logits.return_value = create_deterministic_logits(
-            batch_size, vocab_size, 42
-        )
-    else:
-        logits_returns = [
-            create_deterministic_logits(batch_size, vocab_size, 42 + i)
-            for i in range(num_speculative_tokens)
-        ]
-        model_mock.compute_logits.side_effect = logits_returns
+    model_mock.compute_logits.return_value = create_deterministic_logits(
+        batch_size, vocab_size, 42
+    )
 
     proposer.model = model_mock
     proposer._draft_attn_layer_names = {"layer.0"}
@@ -205,7 +187,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
 
     # Run propose
     result = proposer.propose(
-        num_speculative_tokens=num_speculative_tokens,
+        num_speculative_tokens=runtime_num_speculative_tokens,
         target_token_ids=target_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
@@ -215,7 +197,9 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
         sampling_metadata=sampling_metadata,
     )
 
-    # Verify the model was called correctly
-    assert model_mock.called
-    # Verify output shape
-    assert result.shape == (batch_size, num_speculative_tokens)
+    assert model_mock.call_count == 1
+    assert result.shape == (batch_size, runtime_num_speculative_tokens)
+    if runtime_num_speculative_tokens == 0:
+        model_mock.compute_logits.assert_not_called()
+    else:
+        model_mock.compute_logits.assert_called_once()
