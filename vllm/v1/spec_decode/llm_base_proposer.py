@@ -49,6 +49,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     sample_with_exponential_noise,
 )
 from vllm.v1.sample.sampler import _SAMPLING_EPS
+from vllm.v1.spec_decode.dsd_diag import get_dsd_diagnostics
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
@@ -564,6 +565,8 @@ class SpecDecodeBaseProposer:
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(num_tokens)
         )
+        diag = get_dsd_diagnostics()
+        diag.observe_dispatch(self.num_speculative_tokens, cudagraph_runtime_mode)
 
         model_kwargs, slot_mapping_size = self.build_model_inputs_first_pass(
             num_tokens, num_input_tokens, mm_embed_inputs
@@ -590,7 +593,8 @@ class SpecDecodeBaseProposer:
                 slot_mapping_size, common_attn_metadata.slot_mapping
             ),
         ):
-            ret_hidden_states = self.model(**model_kwargs)
+            with diag.time_forward(self.num_speculative_tokens):
+                ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
